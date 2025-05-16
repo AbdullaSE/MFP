@@ -1,0 +1,129 @@
+from flask import Flask, request, jsonify
+import pandas as pd
+import joblib
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+import os
+
+app = Flask(__name__)
+
+MODEL_PATH = "model.joblib"
+ENCODERS_PATH = "encoders.joblib"
+
+
+def train_and_save_model():
+    # More comprehensive sample data
+    data = {
+        'معدل_التوجيهي': ['90', '85', '75', '95', '80', '88', '92', '78'],
+        'نوع_الثانوية': ['علمي', 'أدبي', 'علمي', 'أدبي', 'علمي', 'أدبي', 'علمي', 'أدبي'],
+        'المواد_المفضلة': ['الرياضيات,الفيزياء', 'اللغة العربية,التاريخ',
+                           'الفيزياء,الكيمياء', 'الرياضيات,اللغة الإنجليزية',
+                           'اللغة الإنجليزية,الرياضيات', 'التاريخ,الفلسفة',
+                           'الرياضيات,الحاسوب', 'الأحياء,الكيمياء'],
+        'أفضل_التخصصات': ['الهندسة', 'الطب', 'الهندسة', 'العلوم السياسية',
+                          'الطب', 'الأدب', 'علوم الحاسوب', 'الصيدلة'],
+        'نمط_العمل_المفضل': ['داخل المدينة', 'في أي مكان', 'في أي مكان',
+                             'داخل المدينة', 'داخل المدينة', 'في أي مكان',
+                             'داخل المدينة', 'في أي مكان'],
+        'الهوايات_المهارات': ['برمجة', 'كتابة', 'مغامرة', 'برمجة',
+                              'قراءة', 'رسم', 'رياضة', 'بحث علمي'],
+        'الوظيفة_أو_المجال_الحلمي': ['مطور برمجيات', 'طبيب', 'مهندس', 'صحفي',
+                                     'مطور برمجيات', 'كاتب', 'عالم بيانات', 'صيدلي'],
+        'التخصص_المختار': ['هندسة البرمجيات', 'الطب البشري', 'هندسة الميكانيك',
+                           'العلاقات الدولية', 'طب الأسنان', 'اللغة العربية',
+                           'علم الحاسوب', 'الصيدلة']
+    }
+
+    df = pd.DataFrame(data)
+
+    # Preprocess data
+    label_encoders = {}
+    for col in df.columns[:-1]:
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col].astype(str))
+        label_encoders[col] = le
+
+    X = df.drop('التخصص_المختار', axis=1)
+    y = df['التخصص_المختار']
+
+    # Train model
+    model = RandomForestClassifier(n_estimators=200, random_state=42, max_depth=5)
+    model.fit(X, y)
+
+    # Save model and encoders
+    joblib.dump(model, MODEL_PATH)
+    joblib.dump(label_encoders, ENCODERS_PATH)
+
+    return model, label_encoders
+
+
+# Load or train model
+if os.path.exists(MODEL_PATH) and os.path.exists(ENCODERS_PATH):
+    model = joblib.load(MODEL_PATH)
+    label_encoders = joblib.load(ENCODERS_PATH)
+else:
+    model, label_encoders = train_and_save_model()
+
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        data = request.get_json()
+
+        # Validate input
+        required_fields = [
+            'معدل_التوجيهي', 'نوع_الثانوية', 'المواد_المفضلة',
+            'أفضل_التخصصات', 'نمط_العمل_المفضل',
+            'الهوايات_المهارات', 'الوظيفة_أو_المجال_الحلمي'
+        ]
+
+        for field in required_fields:
+            if field not in data:
+                return jsonify({'error': f'حقل {field} مطلوب'}), 400
+
+        # Prepare input data
+        input_data = {}
+        for feature, encoder in label_encoders.items():
+            value = str(data.get(feature, ''))
+
+            try:
+                if feature == 'المواد_المفضلة' and isinstance(value, str):
+                    # Handle multiple favorite subjects
+                    input_data[feature] = encoder.transform([value])[0]
+                else:
+                    input_data[feature] = encoder.transform([value])[0]
+            except ValueError as e:
+                return jsonify({
+                    'error': f'قيمة غير صالحة لـ {feature}: {value}',
+                    'allowed_values': list(encoder.classes_)
+                }), 400
+
+        # Make prediction
+        input_df = pd.DataFrame([input_data])
+        prediction = model.predict(input_df)
+
+        # Get prediction probabilities
+        probabilities = model.predict_proba(input_df)[0]
+        classes = model.classes_
+        recommendations = sorted(zip(classes, probabilities),
+                                 key=lambda x: x[1], reverse=True)[:3]
+
+        # Format response
+        result = {
+            'top_prediction': prediction[0],
+            'recommendations': [
+                {'specialization': spec, 'confidence': float(conf)}
+                for spec, conf in recommendations
+            ]
+        }
+
+        return jsonify(result)
+
+    except Exception as e:
+        app.logger.error(f"Prediction error: {str(e)}")
+        return jsonify({'error': 'حدث خطأ أثناء معالجة طلبك'}), 500
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
